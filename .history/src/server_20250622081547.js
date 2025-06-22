@@ -4,10 +4,9 @@ import bookRoutes from './routes/bookRoutes.js'
 import 'dotenv/config'
 import cors from 'cors';
 import { connectDB } from './lib/db.js';
-import job from './lib/cron.js';
 const app = express();
 const Port = process.env.PORT || 3000;
-job.start();
+jo
 // Augmenter la limite de taille pour les images
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
