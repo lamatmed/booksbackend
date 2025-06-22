@@ -1,9 +1,18 @@
 import express from 'express';
-
 import jwt from 'jsonwebtoken';
 import User from '../models/Users.js';
+import cloudinary from '../lib/cloudinary.js';
+import multer from 'multer';
 
 const router = express.Router();
+
+// Configuration de multer pour les uploads de fichiers
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+});
 
 // Middleware pour vérifier le token JWT
 const authenticateToken = async (req, res, next) => {
@@ -181,15 +190,14 @@ router.get('/profile', authenticateToken, async (req, res) => {
 });
 
 // Route pour mettre à jour le profil
-router.put('/profile', authenticateToken, async (req, res) => {
+router.put('/profile', authenticateToken, upload.single('profileImage'), async (req, res) => {
     try {
-        const { username, email, profileImage } = req.body;
+        const { username, email } = req.body;
         const updateData = {};
 
         // Vérifier si les champs sont fournis
         if (username) updateData.username = username.toLowerCase();
         if (email) updateData.email = email.toLowerCase();
-        if (profileImage !== undefined) updateData.profileImage = profileImage;
 
         // Vérifier si le nouveau username ou email existe déjà
         if (username || email) {
@@ -206,6 +214,63 @@ router.put('/profile', authenticateToken, async (req, res) => {
                     message: 'Un utilisateur avec cet email ou nom d\'utilisateur existe déjà' 
                 });
             }
+        }
+
+        // Gestion de l'image de profil
+        if (req.file) {
+            // Nouvelle image uploadée via FormData
+            try {
+                const uploadRes = await cloudinary.uploader.upload_stream(
+                    {
+                        folder: 'avatars',
+                        resource_type: 'image',
+                    },
+                    async (error, result) => {
+                        if (error) {
+                            console.error('Erreur upload Cloudinary:', error);
+                            return res.status(500).json({ 
+                                message: 'Erreur lors de l\'upload de l\'image',
+                                error: error.message 
+                            });
+                        }
+                        
+                        updateData.profileImage = result.secure_url;
+                        
+                        const updatedUser = await User.findByIdAndUpdate(
+                            req.user._id,
+                            updateData,
+                            { new: true, runValidators: true }
+                        ).select('-password');
+
+                        res.json({
+                            message: 'Profil mis à jour avec succès',
+                            user: updatedUser
+                        });
+                    }
+                );
+                
+                // Envoyer le buffer vers Cloudinary
+                uploadRes.end(req.file.buffer);
+                return; // On sort ici car la réponse sera envoyée dans le callback
+                
+            } catch (uploadError) {
+                console.error('Erreur upload Cloudinary:', uploadError);
+                return res.status(500).json({ 
+                    message: 'Erreur lors de l\'upload de l\'image',
+                    error: uploadError.message 
+                });
+            }
+        } else if (req.body.profileImage) {
+            // Image envoyée comme base64 ou URL
+            let imageUrl = req.body.profileImage;
+            if (!/^https?:\/\//.test(imageUrl)) {
+                const uploadRes = await cloudinary.uploader.upload(imageUrl, {
+                    folder: 'avatars',
+                    resource_type: 'image',
+                });
+                imageUrl = uploadRes.secure_url;
+            }
+            updateData.profileImage = imageUrl;
         }
 
         const updatedUser = await User.findByIdAndUpdate(
