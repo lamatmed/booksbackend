@@ -3,9 +3,17 @@ import Book from '../models/Book.js';
 import User from '../models/Users.js';
 import jwt from 'jsonwebtoken';
 import cloudinary from '../lib/cloudinary.js';
-
+import multer from 'multer';
 
 const router = express.Router();
+
+// Configuration de multer pour les uploads de fichiers
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max
+  },
+});
 
 // Middleware pour vérifier le token JWT (copié depuis authRoutes.js)
 const authenticateToken = async (req, res, next) => {
@@ -32,24 +40,24 @@ const authenticateToken = async (req, res, next) => {
 };
 
 // Créer un livre (authentifié)
-router.post('/', authenticateToken, async (req, res) => {
+router.post('/', authenticateToken, upload.single('image'), async (req, res) => {
     try {
         console.log('Création de livre - Données reçues:', {
             title: req.body.title,
             caption: req.body.caption,
             rating: req.body.rating,
+            hasFile: !!req.file,
             imageLength: req.body.image ? req.body.image.length : 0,
             userId: req.user._id
         });
 
-        const { title, caption, image, rating } = req.body;
+        const { title, caption, rating } = req.body;
         
         // Validation des champs
-        if (!title || !caption || !image || !rating) {
+        if (!title || !caption || !rating) {
             console.log('Validation échouée - Champs manquants:', {
                 hasTitle: !!title,
                 hasCaption: !!caption,
-                hasImage: !!image,
                 hasRating: !!rating
             });
             return res.status(400).json({ 
@@ -57,19 +65,62 @@ router.post('/', authenticateToken, async (req, res) => {
                 missing: {
                     title: !title,
                     caption: !caption,
-                    image: !image,
                     rating: !rating
                 }
             });
         }
 
-        let imageUrl = image;
+        let imageUrl = '';
         
-        // Si l'image n'est pas déjà une URL, on suppose que c'est du base64 et on l'upload
-        if (!/^https?:\/\//.test(image)) {
-            console.log('Upload de l\'image vers Cloudinary...');
+        // Gestion de l'image
+        if (req.file) {
+            // Image uploadée via FormData
             try {
-                const uploadRes = await cloudinary.uploader.upload(image, {
+                const uploadRes = await cloudinary.uploader.upload_stream(
+                    {
+                        folder: 'books',
+                        resource_type: 'image',
+                    },
+                    async (error, result) => {
+                        if (error) {
+                            console.error('Erreur upload Cloudinary:', error);
+                            return res.status(500).json({ 
+                                message: 'Erreur lors de l\'upload de l\'image',
+                                error: error.message 
+                            });
+                        }
+                        
+                        const book = new Book({
+                            title,
+                            caption,
+                            image: result.secure_url,
+                            rating,
+                            user: req.user._id
+                        });
+
+                        console.log('Sauvegarde du livre en base de données...');
+                        await book.save();
+                        
+                        console.log('Livre créé avec succès:', book._id);
+                        res.status(201).json({ message: 'Livre créé avec succès', book });
+                    }
+                );
+                
+                // Envoyer le buffer vers Cloudinary
+                uploadRes.end(req.file.buffer);
+                return; // On sort ici car la réponse sera envoyée dans le callback
+                
+            } catch (uploadError) {
+                console.error('Erreur upload Cloudinary:', uploadError);
+                return res.status(500).json({ 
+                    message: 'Erreur lors de l\'upload de l\'image',
+                    error: uploadError.message 
+                });
+            }
+        } else if (req.body.image) {
+            // Image envoyée comme base64
+            try {
+                const uploadRes = await cloudinary.uploader.upload(req.body.image, {
                     folder: 'books',
                     resource_type: 'image',
                 });
@@ -82,6 +133,8 @@ router.post('/', authenticateToken, async (req, res) => {
                     error: uploadError.message 
                 });
             }
+        } else {
+            return res.status(400).json({ message: 'Une image est requise' });
         }
 
         const book = new Book({
@@ -132,7 +185,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Mettre à jour un livre (authentifié, propriétaire uniquement)
-router.put('/:id', authenticateToken, async (req, res) => {
+router.put('/:id', authenticateToken, upload.single('image'), async (req, res) => {
     try {
         const book = await Book.findById(req.params.id);
         if (!book) {
@@ -141,14 +194,53 @@ router.put('/:id', authenticateToken, async (req, res) => {
         if (book.user.toString() !== req.user._id.toString()) {
             return res.status(403).json({ message: 'Non autorisé à modifier ce livre' });
         }
-        const { title, caption, image, rating } = req.body;
+        
+        const { title, caption, rating } = req.body;
+        
         if (title !== undefined) book.title = title;
-      
         if (caption !== undefined) book.caption = caption;
-        if (image !== undefined) {
-            let imageUrl = image;
-            if (!/^https?:\/\//.test(image)) {
-                const uploadRes = await cloudinary.uploader.upload(image, {
+        if (rating !== undefined) book.rating = rating;
+        
+        // Gestion de l'image
+        if (req.file) {
+            // Nouvelle image uploadée via FormData
+            try {
+                const uploadRes = await cloudinary.uploader.upload_stream(
+                    {
+                        folder: 'books',
+                        resource_type: 'image',
+                    },
+                    async (error, result) => {
+                        if (error) {
+                            console.error('Erreur upload Cloudinary:', error);
+                            return res.status(500).json({ 
+                                message: 'Erreur lors de l\'upload de l\'image',
+                                error: error.message 
+                            });
+                        }
+                        
+                        book.image = result.secure_url;
+                        await book.save();
+                        res.json({ message: 'Livre mis à jour', book });
+                    }
+                );
+                
+                // Envoyer le buffer vers Cloudinary
+                uploadRes.end(req.file.buffer);
+                return; // On sort ici car la réponse sera envoyée dans le callback
+                
+            } catch (uploadError) {
+                console.error('Erreur upload Cloudinary:', uploadError);
+                return res.status(500).json({ 
+                    message: 'Erreur lors de l\'upload de l\'image',
+                    error: uploadError.message 
+                });
+            }
+        } else if (req.body.image) {
+            // Image envoyée comme base64 ou URL
+            let imageUrl = req.body.image;
+            if (!/^https?:\/\//.test(imageUrl)) {
+                const uploadRes = await cloudinary.uploader.upload(imageUrl, {
                     folder: 'books',
                     resource_type: 'image',
                 });
@@ -156,10 +248,12 @@ router.put('/:id', authenticateToken, async (req, res) => {
             }
             book.image = imageUrl;
         }
-        if (rating !== undefined) book.rating = rating;
+        
         await book.save();
         res.json({ message: 'Livre mis à jour', book });
+        
     } catch (error) {
+        console.error('Erreur mise à jour livre:', error);
         res.status(500).json({ message: 'Erreur lors de la mise à jour du livre', error: error.message });
     }
 });
